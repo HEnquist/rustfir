@@ -24,6 +24,17 @@ use ProcessingState;
 use Res;
 use StatusMessage;
 
+pub struct GlobalHost {
+    host: Option<cpal::Host>
+}
+
+lazy_static! {
+    pub static ref CPALHOST: Arc<GlobalHost> = Arc::new(GlobalHost {
+        host: None,
+    });
+}
+
+
 #[derive(Clone, Debug)]
 pub enum CpalHost {
     #[cfg(target_os = "macos")]
@@ -73,7 +84,14 @@ fn open_cpal_playback(
         #[cfg(target_os = "windows")]
         CpalHost::Wasapi => HostId::Wasapi,
     };
-    let host = cpal::host_from_id(host_id)?;
+    let host = if let Some(existing_host) = CPALHOST.host {
+        existing_host
+    }
+    else {
+        let new_host = cpal::host_from_id(host_id)?;
+        CPALHOST.host = Some(new_host);
+        new_host
+    };
     let mut devices = host.devices()?;
     let device = match devices.find(|dev| match dev.name() {
         Ok(n) => n == devname,
