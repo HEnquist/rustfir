@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
+use std::time;
 
 use crate::{CaptureStatus, PlaybackStatus};
 use CommandMessage;
@@ -25,11 +26,11 @@ use Res;
 use StatusMessage;
 
 pub struct GlobalHost {
-    host: Option<cpal::Host>
+    pub host: Option<Arc<cpal::Host>>
 }
 
 lazy_static! {
-    pub static ref CPALHOST: Arc<GlobalHost> = Arc::new(GlobalHost {
+    pub static ref CPALHOST: RwLock<GlobalHost> = RwLock::new(GlobalHost {
         host: None,
     });
 }
@@ -78,19 +79,27 @@ fn open_cpal_playback(
     channels: usize,
     sample_format: &SampleFormat,
 ) -> Res<(Device, StreamConfig, cpal::SampleFormat)> {
+    trace!("Open playback device");
     let host_id = match host_cfg {
         #[cfg(target_os = "macos")]
         CpalHost::CoreAudio => HostId::CoreAudio,
         #[cfg(target_os = "windows")]
         CpalHost::Wasapi => HostId::Wasapi,
     };
-    let host = if let Some(existing_host) = CPALHOST.host {
-        existing_host
-    }
-    else {
-        let new_host = cpal::host_from_id(host_id)?;
-        CPALHOST.host = Some(new_host);
-        new_host
+    let host = {
+        let globalhost = &mut CPALHOST.write().unwrap();
+        if let Some(existing_host) = &mut globalhost.host {
+            trace!("Using existing host for playback");
+            Arc::clone(&existing_host)
+        }
+        else {
+            trace!("Create new host for playback");
+            let new_host = Arc::new(cpal::host_from_id(host_id)?);
+            trace!("Store new host for playback");
+            globalhost.host = Some(Arc::clone(&new_host));
+            trace!("Created new host for playback");
+            new_host
+        }
     };
     let mut devices = host.devices()?;
     let device = match devices.find(|dev| match dev.name() {
@@ -124,13 +133,28 @@ fn open_cpal_capture(
     channels: usize,
     sample_format: &SampleFormat,
 ) -> Res<(Device, StreamConfig, cpal::SampleFormat)> {
+    trace!("Open capture device");
     let host_id = match host_cfg {
         #[cfg(target_os = "macos")]
         CpalHost::CoreAudio => HostId::CoreAudio,
         #[cfg(target_os = "windows")]
         CpalHost::Wasapi => HostId::Wasapi,
     };
-    let host = cpal::host_from_id(host_id)?;
+    let host = {
+        let globalhost = &mut CPALHOST.write().unwrap();
+        if let Some(existing_host) = &mut globalhost.host {
+            trace!("Using existing host for playback");
+            Arc::clone(&existing_host)
+        }
+        else {
+            trace!("Create new host for playback");
+            let new_host = Arc::new(cpal::host_from_id(host_id)?);
+            trace!("Store new host for playback");
+            globalhost.host = Some(Arc::clone(&new_host));
+            trace!("Created new host for playback");
+            new_host
+        }
+    };
     let mut devices = host.devices()?;
     let device = match devices.find(|dev| match dev.name() {
         Ok(n) => n == devname,
@@ -216,18 +240,23 @@ impl PlaybackDevice for CpalPlaybackDevice {
                                 let mut clipped = 0;
                                 let mut sample_queue: VecDeque<i16> =
                                     VecDeque::with_capacity(4 * chunksize_clone * channels_clone);
+                                let delay = time::Duration::from_millis((1000*chunksize_clone/samplerate) as u64);
                                 let stream = device.build_output_stream(
                                     &stream_config,
                                     move |mut buffer: &mut [i16], _: &cpal::OutputCallbackInfo| {
                                         //trace!("Playback device requests {} samples", buffer.len());
                                         while sample_queue.len() < buffer.len() {
                                             //trace!("Convert chunk to device format");
-                                            let chunk = rx_dev.recv().unwrap();
-                                            clipped = chunk_to_queue_int(
-                                                &chunk,
-                                                &mut sample_queue,
-                                                scalefactor,
-                                            );
+                                            match rx_dev.recv_timeout(delay) {
+                                                Ok(chunk) => clipped = chunk_to_queue_int(&chunk, &mut sample_queue, scalefactor),
+                                                Err(_) => {
+                                                    trace!("Dropping this one..");
+                                                    for sample in buffer.iter_mut() {
+                                                        *sample = 0;
+                                                    }
+                                                    return;
+                                                },
+                                            }
                                         }
                                         write_data_to_device(&mut buffer, &mut sample_queue);
                                         buffer_fill_clone
@@ -249,15 +278,23 @@ impl PlaybackDevice for CpalPlaybackDevice {
                                 let mut clipped = 0;
                                 let mut sample_queue: VecDeque<f32> =
                                     VecDeque::with_capacity(4 * chunksize_clone * channels_clone);
+                                let delay = time::Duration::from_millis((1000*chunksize_clone/samplerate) as u64);
                                 let stream = device.build_output_stream(
                                     &stream_config,
                                     move |mut buffer: &mut [f32], _: &cpal::OutputCallbackInfo| {
                                         //trace!("Playback device requests {} samples", buffer.len());
                                         while sample_queue.len() < buffer.len() {
                                             //trace!("Convert chunk to device format");
-                                            let chunk = rx_dev.recv().unwrap();
-                                            clipped =
-                                                chunk_to_queue_float(&chunk, &mut sample_queue);
+                                            match rx_dev.recv_timeout(delay) {
+                                                Ok(chunk) => clipped = chunk_to_queue_float(&chunk, &mut sample_queue),
+                                                Err(_) => {
+                                                    trace!("Dropping this one..");
+                                                    for sample in buffer.iter_mut() {
+                                                        *sample = 0.0;
+                                                    }
+                                                    return;
+                                                },
+                                            }
                                         }
                                         write_data_to_device(&mut buffer, &mut sample_queue);
                                         buffer_fill_clone

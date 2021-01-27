@@ -157,12 +157,6 @@ fn run(
         status_structs.processing,
     );
 
-    // Playback thread
-    let mut playback_dev = audiodevice::get_playback_device(conf_pb.devices);
-    let pb_handle = playback_dev
-        .start(rx_pb, barrier_pb, tx_status_pb, status_structs.playback)
-        .unwrap();
-
     let used_channels = config::get_used_capture_channels(&active_config);
     debug!("Using channels {:?}", used_channels);
     status_structs.capture.write().unwrap().used_channels = used_channels;
@@ -180,6 +174,14 @@ fn run(
         .unwrap();
 
     let delay = time::Duration::from_millis(100);
+
+        // Playback thread
+    let mut playback_dev = audiodevice::get_playback_device(conf_pb.devices);
+    let pb_handle = playback_dev
+        .start(rx_pb, barrier_pb, tx_status_pb, status_structs.playback)
+        .unwrap();
+
+    
 
     let mut pb_ready = false;
     let mut cap_ready = false;
